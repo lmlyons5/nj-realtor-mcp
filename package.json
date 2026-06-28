@@ -1,0 +1,22 @@
+{
+  "name": "nj-realtor-mcp",
+  "version": "1.0.0",
+  "description": "Frontier NJ Real Estate MCP Server",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.1",
+    "axios": "^1.6.7",
+    "axios-retry": "^4.0.0",
+    "winston": "^3.11.0",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "vitest": "^1.2.2"
+  }
+}

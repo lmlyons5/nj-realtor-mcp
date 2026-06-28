@@ -1,0 +1,127 @@
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL 16 + pgvector + PostGIS ──────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nj_realtor_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nj_realtor
+      POSTGRES_USER: ${POSTGRES_USER:-realtor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./scripts/seed_nj_zips.sql:/docker-entrypoint-initdb.d/02_seed_zips.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-realtor} -d nj_realtor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (caching + job queue) ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nj_realtor_cache
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Crawl4AI — async web crawler with Playwright ─────────────────────────────
+  # Self-hosted: full browser automation, LLM extraction, anti-bot mode
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: nj_crawl4ai
+    restart: unless-stopped
+    environment:
+      CRAWL4AI_API_KEY: ${CRAWL4AI_API_KEY:?required}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?required}
+      # Use Claude Sonnet for extraction (fast + smart)
+      EXTRACTION_MODEL: anthropic/claude-sonnet-4-6
+      # Anti-detection settings
+      STEALTH_MODE: "true"
+      RANDOM_DELAYS: "true"
+    volumes:
+      - crawl4ai_cache:/root/.crawl4ai
+    ports:
+      - "11235:11235"
+    shm_size: 2gb  # Playwright needs shared memory
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11235/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+
+  # ── MCP Server ────────────────────────────────────────────────────────────────
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nj_realtor_mcp
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      crawl4ai:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-realtor}:${POSTGRES_PASSWORD}@postgres:5432/nj_realtor
+      REDIS_URL: redis://redis:6379
+      CRAWL4AI_URL: http://crawl4ai:11235
+      NODE_ENV: production
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src:ro
+    ports:
+      - "3000:3000"
+
+  # ── Cron: background jobs ─────────────────────────────────────────────────────
+  # Runs: MLS sync (every 15min), market stats aggregation (nightly),
+  # client alert checks (every 5min), Redfin data refresh (weekly)
+  cron:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nj_realtor_cron
+    restart: unless-stopped
+    command: node src/cron.js
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-realtor}:${POSTGRES_PASSWORD}@postgres:5432/nj_realtor
+      REDIS_URL: redis://redis:6379
+      CRAWL4AI_URL: http://crawl4ai:11235
+    env_file:
+      - .env
+
+volumes:
+  postgres_data:
+  redis_data:
+  crawl4ai_cache:
+
+networks:
+  default:
+    name: nj_realtor_net
